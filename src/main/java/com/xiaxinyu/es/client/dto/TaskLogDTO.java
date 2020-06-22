@@ -2,12 +2,8 @@ package com.xiaxinyu.es.client.es.dto;
 
 import lombok.*;
 
-/**
- * @author Caiguang
- * @Description: agent部署写入es日志实体类 兼容以前的es
- * @CreateDate: 2019/10/19
- */
-@Data
+@Setter
+@Getter
 @ToString
 @Builder
 @AllArgsConstructor
