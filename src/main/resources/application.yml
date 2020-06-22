@@ -1,0 +1,7 @@
+es:
+  host: localhost
+  port: root
+  workThread: 5
+  connectionRequestTimeout: 1000
+  connectTimeout: 1000
+  socketTimeout: 1000
