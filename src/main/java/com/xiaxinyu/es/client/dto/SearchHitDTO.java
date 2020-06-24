@@ -1,4 +1,4 @@
-package com.xiaxinyu.es.client.es.dto;
+package com.xiaxinyu.es.client.dto;
 
 import lombok.Data;
 import lombok.ToString;

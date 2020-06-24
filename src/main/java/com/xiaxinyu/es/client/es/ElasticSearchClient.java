@@ -1,14 +1,20 @@
 package com.xiaxinyu.es.client.es;
 
 import com.alibaba.fastjson.JSONObject;
-import com.xiaxinyu.es.client.es.dto.TaskLogDTO;
+import com.xiaxinyu.es.client.dto.TaskLogDTO;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.lang.StringUtils;
+import org.elasticsearch.action.admin.indices.alias.Alias;
+import org.elasticsearch.action.delete.DeleteRequest;
+import org.elasticsearch.action.delete.DeleteResponse;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.action.search.SearchRequest;
 import org.elasticsearch.action.search.SearchResponse;
 import org.elasticsearch.client.RequestOptions;
 import org.elasticsearch.client.RestHighLevelClient;
+import org.elasticsearch.client.indices.CreateIndexRequest;
+import org.elasticsearch.client.indices.CreateIndexResponse;
+import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.common.xcontent.XContentType;
 import org.elasticsearch.index.query.MatchQueryBuilder;
 import org.elasticsearch.search.SearchHit;
@@ -33,38 +39,54 @@ import java.util.Objects;
 @Component
 @Slf4j
 public class ElasticSearchClient {
-    private static final String DEFAULT_INDICES = "es_task_result";
-    private static final int QUERY_FROM_INDEX = 0;
-    private static final int QUERY_SIZE = 2000;
-
     @Autowired
     RestHighLevelClient restHighLevelClient;
 
-    public List<String> queryByTaskExecuteId(String taskExecuteId) {
-        log.info("根据任务ID查询任务， taskExecuteId={}", taskExecuteId);
+    public boolean createIndex(String index) {
+        CreateIndexRequest request = new CreateIndexRequest(index);
+        request.settings(Settings.builder().put("index.number_of_shards", 10).put("index.number_of_replicas", 1));
+
+        //设置别名
+        request.alias(new Alias(index + "alias"));
+        //设置创建索引超时2分钟
+        request.setTimeout(TimeValue.timeValueMinutes(2));
+
+        try {
+            CreateIndexResponse createIndexResponse = restHighLevelClient.indices().create(request, RequestOptions.DEFAULT);
+            // 处理响应
+            boolean acknowledged = createIndexResponse.isAcknowledged();
+            boolean shardsAcknowledged = createIndexResponse.isShardsAcknowledged();
+            System.out.println(acknowledged + "," + shardsAcknowledged);
+            log.info("创建索引响应：acknowledged={}, shardsAcknowledged={}", acknowledged, shardsAcknowledged);
+        } catch (IOException e) {
+            log.error("索引创建异常：index={}", index, e);
+            return false;
+        }
+        return true;
+    }
+
+    public boolean addIndex(String index, TaskLogDTO taskLogDto) {
+        try {
+            IndexRequest indexRequest = new IndexRequest(index);
+            indexRequest.source(JSONObject.toJSONString(taskLogDto), XContentType.JSON);
+            log.debug("写入到es的日志数据是:{}", taskLogDto);
+            restHighLevelClient.index(indexRequest, RequestOptions.DEFAULT);
+        } catch (IOException e) {
+            log.error("部署任务日志写入es报错", e);
+            return false;
+        }
+        return true;
+    }
+
+    public List<String> queryIndex(String index, String taskExecuteId) {
+        log.info("根据任务ID查询任务: index={}, taskExecuteId={}", index, taskExecuteId);
         List<String> result = new ArrayList<>();
         try {
-            SearchRequest searchRequest = new SearchRequest();
-            searchRequest.indices(DEFAULT_INDICES);
-
-            //查询条件
-            SearchSourceBuilder sourceBuilder = new SearchSourceBuilder();
-            sourceBuilder.query(new MatchQueryBuilder("taskExecuteId", taskExecuteId));
-            sourceBuilder.sort(new FieldSortBuilder("endTime.keyword").order(SortOrder.ASC));
-            sourceBuilder.from(QUERY_FROM_INDEX);
-            sourceBuilder.size(QUERY_SIZE);
-            searchRequest.source(sourceBuilder);
-
-            //查询加解析
-            SearchResponse response = restHighLevelClient.search(searchRequest, RequestOptions.DEFAULT);
-            if (Objects.nonNull(response) && Objects.nonNull(response.getHits())) {
-                SearchHits searchHits = response.getHits();
-                SearchHit[] searchHitArray = searchHits.getHits();
-                if (Objects.nonNull(searchHitArray) && searchHitArray.length > 0) {
-                    result = new ArrayList<>();
-                    for (SearchHit searchHit : searchHitArray) {
-                        result.add(searchHit.getSourceAsString());
-                    }
+            SearchHit[] searchHitArray = commonQuery(index, taskExecuteId);
+            if (Objects.nonNull(searchHitArray) && searchHitArray.length > 0) {
+                result = new ArrayList<>();
+                for (SearchHit searchHit : searchHitArray) {
+                    result.add(searchHit.getSourceAsString());
                 }
             }
         } catch (Exception e) {
@@ -74,23 +96,43 @@ public class ElasticSearchClient {
         return result;
     }
 
-    /**
-     * 将处理日志写入es
-     *
-     * @param taskLogDTO
-     */
-    public void insertTaskLog(TaskLogDTO taskLogDTO) {
+    public boolean deleteIndex(String index, String taskExecuteId) {
         try {
-            if (StringUtils.isNotBlank(taskLogDTO.getResult())) {
-                IndexRequest indexRequest = new IndexRequest(DEFAULT_INDICES);
-                indexRequest.source(JSONObject.toJSONString(taskLogDTO), XContentType.JSON);
-                log.debug("写入到es的日志数据是:{}", taskLogDTO);
-                restHighLevelClient.index(indexRequest, RequestOptions.DEFAULT);
+            SearchHit[] searchHitArray = commonQuery(index, taskExecuteId);
+            if (Objects.nonNull(searchHitArray) && searchHitArray.length > 0) {
+                DeleteRequest deleteRequest = new DeleteRequest();
+                for (SearchHit hit : searchHitArray) {
+                    deleteRequest = new DeleteRequest(index, hit.getId());
+                    DeleteResponse deleteResponse = restHighLevelClient.delete(deleteRequest, RequestOptions.DEFAULT);
+                    log.info("Delete Done【" + deleteResponse.getId() + "】,Status:【" + deleteResponse.status() + "】");
+                }
             }
-        } catch (IOException e) {
-            log.error("部署任务日志写入es报错", e);
-            throw new RuntimeException("insert.es.logs.error");
+        } catch (Exception e) {
+            log.error("删除索引出现错误：index={}, taskExecuteId={}", index, taskExecuteId, e);
+            return false;
         }
+        return true;
+    }
 
+    public SearchHit[] commonQuery(String index, String taskExecuteId) throws IOException {
+        SearchRequest searchRequest = new SearchRequest();
+        searchRequest.indices(index);
+
+        //查询条件
+        SearchSourceBuilder sourceBuilder = new SearchSourceBuilder();
+        sourceBuilder.query(new MatchQueryBuilder("taskExecuteId", taskExecuteId));
+        //sourceBuilder.sort(new FieldSortBuilder("endTime.keyword").order(SortOrder.ASC));
+        //sourceBuilder.from(QUERY_FROM_INDEX);
+        // sourceBuilder.size(QUERY_SIZE);
+        searchRequest.source(sourceBuilder);
+
+        //查询加解析
+        SearchResponse response = restHighLevelClient.search(searchRequest, RequestOptions.DEFAULT);
+        if (Objects.isNull(response) || Objects.isNull(response.getHits())) {
+            return null;
+        }
+        SearchHits searchHits = response.getHits();
+        SearchHit[] searchHitArray = searchHits.getHits();
+        return searchHitArray;
     }
 }
